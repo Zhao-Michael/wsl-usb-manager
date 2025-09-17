@@ -1,11 +1,3 @@
-use std::{
-    cell::{Cell, RefCell},
-    rc::Rc,
-};
-
-use native_windows_derive::NwgUi;
-use native_windows_gui as nwg;
-
 use super::auto_attach_tab::AutoAttachTab;
 use super::connected_tab::ConnectedTab;
 use super::persisted_tab::PersistedTab;
@@ -13,6 +5,16 @@ use crate::usbipd::{list_devices, UsbDevice};
 use crate::{
     auto_attach::AutoAttacher,
     win_utils::{self, DeviceNotification},
+};
+use native_windows_derive::NwgUi;
+use native_windows_gui as nwg;
+use native_windows_gui::MenuItem;
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+use std::process::Command;
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
 };
 
 pub(super) trait GuiTab {
@@ -23,10 +25,19 @@ pub(super) trait GuiTab {
     fn refresh(&self);
 }
 
+// 命令结构体
+#[derive(Debug)]
+struct CmdEntry {
+    name: String,
+    command: String,
+}
+
 #[derive(Default, NwgUi)]
 pub struct UsbipdGui {
     device_notification: Cell<DeviceNotification>,
     menu_tray_event_handler: Cell<Option<nwg::EventHandler>>,
+    cmd_list: RefCell<Vec<CmdEntry>>,
+    cmd_menu_list: RefCell<Vec<MenuItem>>,
 
     #[nwg_resource]
     embed: nwg::EmbedResource,
@@ -35,7 +46,8 @@ pub struct UsbipdGui {
     app_icon: nwg::Icon,
 
     // Window
-    #[nwg_control(size: (780, 430), center: true, title: "WSL USB Manager", icon: Some(&data.app_icon))]
+    #[nwg_control(size: (780, 430), center: true, title: "WSL USB Manager", icon: Some(&data.app_icon)
+    )]
     #[nwg_events(
         OnInit: [UsbipdGui::init],
         OnMinMaxInfo: [UsbipdGui::min_max_info(EVT_DATA)],
@@ -122,6 +134,8 @@ impl UsbipdGui {
             })
             .expect("Failed to register USB device notifications"),
         );
+
+        self.cmd_list.replace(parse_cmd_file("cmd.txt"));
     }
 
     fn min_max_info(data: &nwg::EventData) {
@@ -187,6 +201,19 @@ impl UsbipdGui {
         };
 
         self.new_menu_separator(menu_tray.handle).unwrap();
+        let mut menus = vec![];
+
+        for item in self.cmd_list.borrow().iter() {
+            let menu = self
+                .new_menu_item(menu_tray.handle, &*item.name, false, false)
+                .unwrap();
+            menus.push(menu);
+        }
+
+        self.cmd_menu_list.replace(menus);
+
+        self.new_menu_separator(menu_tray.handle).unwrap();
+
         let open_item = self
             .new_menu_item(menu_tray.handle, "Open", false, false)
             .unwrap();
@@ -216,6 +243,20 @@ impl UsbipdGui {
                     // The exit menu item was selected
                     UsbipdGui::exit();
                 } else {
+                    let index = rc_self
+                        .cmd_menu_list
+                        .borrow()
+                        .iter()
+                        .position(|x| x.handle == handle);
+                    let list = rc_self.cmd_list.borrow();
+                    match index {
+                        Some(i) => {
+                            let cmd = &list[i].command;
+                            run_cmd(cmd)
+                        }
+                        None => println!("Not found"),
+                    }
+
                     // A device menu item was selected
                     let Some(device) = menu_items
                         .iter()
@@ -283,4 +324,44 @@ impl UsbipdGui {
     fn exit() {
         nwg::stop_thread_dispatch();
     }
+}
+
+// 解析命令文件
+fn parse_cmd_file(filename: &str) -> Vec<CmdEntry> {
+    let mut commands = Vec::new();
+    if let Ok(file) = File::open(filename) {
+        let reader = BufReader::new(file);
+        let mut current_line = String::new();
+
+        for line in reader.lines() {
+            if let Ok(line) = line {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                current_line.push_str(&line);
+
+                // 检查是否以分号结尾
+                if let Some(colon_index) = current_line.find(':') {
+                    let name = current_line[..colon_index].trim().to_string();
+                    let command = current_line[colon_index + 1..]
+                        .trim()
+                        .trim_end_matches(';')
+                        .trim()
+                        .to_string();
+
+                    if !name.is_empty() && !command.is_empty() {
+                        commands.push(CmdEntry { name, command });
+                    }
+                }
+                current_line.clear();
+            }
+        }
+    }
+    commands
+}
+
+fn run_cmd(cmd: &str) {
+    println!("{}", cmd);
+    let _ = Command::new("cmd").args(&["/C", cmd]).spawn();
 }

@@ -1,0 +1,2 @@
+启动 WSL:wsl
+关闭 WSL:wsl --shutdown
